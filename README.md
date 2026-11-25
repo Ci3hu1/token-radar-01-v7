@@ -1,63 +1,73 @@
-# Launch Ledger v7
+[![token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/Ci3hu1/token-radar-01-v7/rank.svg)](https://make.fun/bounty/token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/Ci3hu1/token-radar-01-v7/reward.svg)](https://make.fun/bounty/token-radar-01)
 
-[![Build the best token launch radar](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01)
-[![Rank](https://make.fun/badge/token-radar-01/Ci3hu1/token-radar-01-v7/rank.svg)](https://make.fun/bounty/token-radar-01)
-[![Reward](https://make.fun/badge/token-radar-01/Ci3hu1/token-radar-01-v7/reward.svg)](https://make.fun/bounty/token-radar-01)
+# Launch Ledger v7 — Token Radar
 
-A token launch radar: which pre-token protocol is worth farming next, what it
-is worth, and what to do about it. It fits a value curve and token-launch odds
-from the snapshot's own figures, ranks all 226 protocols on the board by
-expected value, and writes a costed farm plan for every row worth farming.
+Which pre-token protocol is worth farming next, and what do I do about it?
+Launch Ledger v7 ranks the 226 pre-token protocols in the sealed DefiLlama
+snapshot by what their launch would be worth — implied market cap × the odds
+they issue a token — and gives each one a concrete farm plan, with the
+evidence that every term in the model earned its place.
 
-## How it works
+- **Bounty:** [token-radar-01 — Build the best token launch radar](https://make.fun/bounty/token-radar-01) ($1,325, 10 places)
+- **Referral:** `cc7tcnw6`
+- **Run it:** `MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>` (Node 22, standard library only; no network, no clock — two runs write the same bytes)
+- **Tests:** `node --test tests/model.test.ts` (18/18)
 
-- **Value:** OLS of log10 market cap on log10 TVL over the 128 protocols
-  that already have a token, blended 72/28 with the flat median market
-  cap / TVL multiple. Category multipliers are shrunk and clamped to
-  [0.60, 1.80] so two thin categories cannot drag the board.
-- **Odds:** a logistic regression on 449 peers (listing date, 7-day change,
-  log TVL), frozen to four constants. P(token) × implied market cap is the
-  expected value.
-- **Verdicts:** costed, not vibes — net = 5% of the launch split among
-  10,000 farmers, less $12 gas and $1 capital. Net ≥ $50 is FARM, ≥ $0 is
-  THIN, else SKIP. 20 FARM, 93 THIN, 113 SKIP; farm plans for all 113.
-- **Evidence:** validation on four splits, value and odds ablation tables,
-  an odds calibration table, and bootstrap expected-value intervals
-  (P5–P95) with rank ranges on every top-20 row — fragile ranks are flagged,
-  not hidden. See STRATEGY.md for the numbers.
-- **Integrity:** the board's sha-256 checksum is computed live and printed
-  on the cover; the dashboard is a static field guide (light paper, serif),
-  Node 22 standard library only, no network.
+## The board
 
-Top of the board: steakhouse-financial $152,994,608 (P 0.7125, rank 1–1),
-gauntlet $95,119,919, veda $54,690,945, usdd $51,256,531, nonce-capital
-$32,726,180. Sum of expected values $1,335,071,152.
+| | |
+| --- | --- |
+| Board | 226 protocols (40 watchlist + 186 eligible below the $50M floor) |
+| Traded (excluded) | 416 — their tokens already trade; they are the curve's anchors |
+| Excluded | 116 — CEX / versioned, or above the floor and off the watchlist |
+| Top-1 | Steakhouse Financial — $152,994,608 expected value (P5–P95 $74,418,826–$241,309,207, rank 1–1) |
+| Top-5 | steakhouse-financial, gauntlet, veda, usdd, nonce-capital |
+| Verdicts | 20 FARM · 93 THIN · 113 SKIP |
+| Farm plans | 113 concrete plans ($1,000 capital, ~$12 gas, 30-day hold, exit trigger) |
+| Sum of expected values | $1,335,071,152 |
+| Checksum | `db668a77` (sha256 of the compact rows as JSON, first 8 hex) |
 
-## Run it
+## The model
 
-Node 22, standard library only, no network:
+Implied market cap: a log-log OLS curve of mcap on TVL over the 128 traded
+anchors (intercept 3.0247, slope 0.5223, R² 0.1939), with a shrunken
+per-category multiplier clamped to 0.60×–1.80×, blended 72/28 with the flat
+median mcap/TVL multiple (0.2138). P(token): a logistic regression on log
+TVL, age and 7-day change, fitted on 449 eligible peers. Expected value =
+implied mcap × P(token). Verdict: 5% of the launch split among 10,000
+farmers, less $12 gas and $1 cost — FARM at $50 net, THIN at $0, else SKIP.
 
-```
-MAKEFUN_OUTPUT_DIR=out node main.ts --input input/snapshot.json
-```
+What v7 adds over v6: the tighter clamp (Veda passes USDD into third);
+drop-one-out ablation tables for the value and odds terms; the odds
+calibration deciles (weighted error 0.0441, Platt recalibration tested and
+rejected); bootstrap P5–P95 expected-value intervals and rank ranges on the
+top 20, with three fragile ranks flagged; and a concrete farm plan on every
+FARM and THIN row.
 
-Writes `out/board.json`, `out/data.js`, `out/dashboard/`, `out/screenshots/`
-and `out/dossier.json`. Two runs write byte-identical output.
+The dashboard is a field-guide page: the full ranked board (226 rows) with
+EV intervals and fragile flags, a filter (try Lending — "Showing 14 of 226"),
+a detail view per protocol with factors, comps and a farm plan, compare
+mode, pinning, CSV export, a model sandbox, the evidence tables, and a
+cover self-check that answers the board's own checks. See
+[STRATEGY.md](STRATEGY.md) for the strategy and [NOTES.md](NOTES.md) for the
+fitted values and validation.
 
-Tests:
+## Files
 
-```
-node --test tests/model.test.ts
-```
+- `main.ts` — the entrypoint: reads the snapshot, writes `board.json`,
+  `data.js`, `dashboard/`, `screenshots/` and `dossier.json`
+- `lib/model.ts` — the whole model: snapshot + ledger, value curve,
+  multipliers and blend, logistic odds, evidence tables, board assembly,
+  bootstrap, checksum, farm plans
+- `dashboard/` — `index.html`, `app.css`, `app.js` (no network)
+- `screenshots/` — the board, a filtered view, a detail view, the evidence
+- `vendor/makefun-board.ts` — the kit's dossier library, byte for byte
+- `tests/model.test.ts` — the fitted numbers, pinned
 
-18 tests, all passing — they pin the ledger, the fitted model, the top 5,
-the verdicts, the validation numbers, both ablations, the calibration, the
-bootstrap ranges, and determinism.
+## Limits
 
-## Bounty
-
-Entry for [Build the best token launch radar](https://make.fun/bounty/token-radar-01)
-($1,325, 10 paid places, entries close 14 Dec 2026).
-
-Built with [make.fun](https://make.fun/r/cc7tcnw6) — earn USDC by winning
-coding bounties with your AI agent.
+"Records no token" is DefiLlama's record, not proof. Implied values are this
+entry's own claim, not make.fun's. A FARM verdict is a positive expected
+value, not a guarantee — most farms pay nothing. Not financial advice.

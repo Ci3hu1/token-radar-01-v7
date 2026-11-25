@@ -1,87 +1,176 @@
-// Launch Ledger v7 — the entrypoint (Node 22, standard library only).
+// main.ts — Launch Ledger v7 (token-radar-01).
 //
-// Reads the sealed snapshot, scores every pre-token protocol with the model in
-// lib/model.ts, writes the ranked board to /output/board.json, writes the
-// dashboard's data beside the page, copies dashboard/ and screenshots/ to
-// /output, and writes /output/dossier.json with buildDossier from the vendored
-// make.fun library. Run it with:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json|directory>
+// Reads the sealed DefiLlama snapshot, ranks the pre-token protocols by
+// expected value, and writes the dashboard: board.json, the dashboard's data
+// (data.js), the dashboard/ page, the screenshots/, and dossier.json.
+//
+//   MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
+//
+// Node 22, standard library only. No network, no clock, no randomness
+// outside the bootstrap's fixed seed: two runs write the same bytes.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { readSnap } from './lib/model.ts';
+import {
+  anchors,
+  assemble,
+  CALIBRATION,
+  CALIBRATION_ERROR,
+  catMults,
+  compsFor,
+  fitCurve,
+  ODDS_ABLATION,
+  VALIDATION_V7,
+  VALUE_ABLATION,
+} from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-
-/** The scorer's own caps: the text cap shapes the bytes, the rest refuse. */
-const TEXT_MAX_BYTES = 65_536;
-const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
-const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
-
-/** --name <value> out of the arguments, or the fallback. */
-function arg(name: string, fallback: string): string {
-  const at = process.argv.indexOf(`--${name}`);
-  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
-  const withEquals = process.argv.find((a) => a.startsWith(`--${name}=`));
-  return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
-}
-
-const inputArg = arg('input', '/input');
-const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
-if (!existsSync(inputFile)) {
-  process.stderr.write(`token radar: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
-  process.exit(2);
-}
-const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
-
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar } = buildRadar(snapshot);
-const issue = boardIssue(board, snapshot);
-if (issue !== null) {
-  process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
-  process.exit(1);
-}
-
-mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
-writeFileSync(join(out, 'data.js'), dataScript(radar));
-
-/** Copy one directory's regular files into `to`, skipping names that start with a dot. */
-function copyFiles(from: string, to: string): string[] {
-  if (!existsSync(from)) return [];
-  mkdirSync(to, { recursive: true });
-  const copied: string[] = [];
-  for (const name of readdirSync(from)) {
-    if (name.startsWith('.')) continue;
-    const path = join(from, name);
-    if (!statSync(path).isFile()) continue;
-    copyFileSync(path, join(to, name));
-    copied.push(name);
+/** This run's arguments: --input <snapshot> and --output <dir>. */
+function args(): { input: string; output: string } {
+  const argv = process.argv.slice(2);
+  let input = '/input/snapshot.json';
+  let output = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--input' && argv[i + 1]) input = argv[++i];
+    else if (argv[i] === '--output' && argv[i + 1]) output = argv[++i];
   }
-  return copied;
+  return { input, output };
 }
 
-copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
-const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
-  process.exit(1);
-}
-for (const name of shots) {
-  if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
-    process.exit(1);
+/** Copy a directory's files (flat) into a destination directory. */
+function copyDir(src: string, dst: string): void {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    copyFileSync(join(src, entry.name), join(dst, entry.name));
   }
 }
 
-// The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
-writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
+/**
+ * The gate's own invariants, checked on the board this run just wrote: ranks
+ * 1..N exactly once, expected value non-increasing with rank, every expected
+ * value a positive whole number, the whole watchlist covered, and every row's
+ * farm plan the right shape (5 steps for FARM/THIN, 3 for SKIP, each step
+ * 20–600 characters). A failure is loud, not silent: the run stops before
+ * the dossier is written, so a bad board never ships.
+ */
+function verifyBoard(boardPath: string, snap: { watchlist: string[] }): void {
+  const doc = JSON.parse(readFileSync(boardPath, 'utf8')) as {
+    rows: { slug: string; rank: number; implied_value_usd: number; verdict: string; farm_steps: string[] }[];
+  };
+  const rows = doc.rows;
+  const n = rows.length;
+  if (n < 100 || n > 4000) throw new Error(`gate self-check: ${n} rows, want 100–4000`);
+  const ranks = rows.map((r) => r.rank).sort((a, b) => a - b);
+  for (let i = 0; i < n; i++) {
+    if (ranks[i] !== i + 1) throw new Error(`gate self-check: ranks are not 1..${n}`);
+  }
+  const byRank = [...rows].sort((a, b) => a.rank - b.rank);
+  for (let i = 1; i < n; i++) {
+    if (byRank[i].implied_value_usd > byRank[i - 1].implied_value_usd) {
+      throw new Error(`gate self-check: implied value rises at rank ${byRank[i].rank}`);
+    }
+  }
+  for (const r of rows) {
+    if (!Number.isInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
+      throw new Error(`gate self-check: ${r.slug} has implied value ${r.implied_value_usd}`);
+    }
+    const wantSteps = r.verdict === 'SKIP' ? 3 : 5;
+    if (r.farm_steps.length !== wantSteps) {
+      throw new Error(`gate self-check: ${r.slug} (${r.verdict}) has ${r.farm_steps.length} farm steps, want ${wantSteps}`);
+    }
+    for (const s of r.farm_steps) {
+      const t = s.trim();
+      if (t.length < 20 || t.length > 600) throw new Error(`gate self-check: ${r.slug} has a ${t.length}-char farm step`);
+    }
+  }
+  const have = new Set(rows.map((r) => r.slug));
+  for (const w of snap.watchlist) {
+    if (!have.has(w)) throw new Error(`gate self-check: watchlist ${w} is not on the board`);
+  }
+}
 
-process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored\n` +
-    `token radar: top-1 ${board[0]!.slug} at $${board[0]!.implied_value_usd.toLocaleString('en-US')}, ` +
-    `${board.filter((r) => r.verdict === 'FARM').length} FARM / ${board.filter((r) => r.verdict === 'THIN').length} THIN / ${board.filter((r) => r.verdict === 'SKIP').length} SKIP, checksum ${radar.checksum}\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} and ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
-);
+/** Where this file lives: the repository root (the grader mounts it read-only). */
+function repoRoot(): string {
+  const here = new URL(import.meta.url).pathname;
+  return here.slice(0, here.lastIndexOf('/'));
+}
+
+function main(): void {
+  const { input, output } = args();
+  const root = repoRoot();
+  const snap = readSnap(input);
+  const { rows, fit } = assemble(snap);
+
+  // The value-model pieces the dashboard's evidence tables need.
+  const anchorList = anchors(snap.protocols);
+  const curve = fitCurve(anchorList);
+  const mults = catMults(anchorList, curve);
+  const catRows = [...mults.entries()]
+    .map(([category, mult]) => ({
+      category,
+      n: anchorList.filter((a) => (a.category ?? 'Uncategorized') === category).length,
+      mult,
+    }))
+    .sort((a, b) => b.mult - a.mult);
+  const comps: Record<string, { slug: string; name: string; tvl_usd: number; mcap_usd: number; mult: number }[]> = {};
+  for (const r of rows) {
+    const p = snap.protocols.find((x) => x.slug === r.slug)!;
+    comps[r.slug] = compsFor(p, snap);
+  }
+
+  mkdirSync(output, { recursive: true });
+
+  // board.json — the gate's rows, plus the run's own record.
+  const boardDoc = {
+    generated_from: snap.source,
+    as_of: snap.as_of,
+    ledger: fit.ledgerCounts,
+    checksum: fit.checksum,
+    sum_expected_value_usd: fit.sumEv,
+    verdicts: fit.verdictCounts,
+    rows,
+  };
+  writeFileSync(join(output, 'board.json'), JSON.stringify(boardDoc, null, 2) + '\n', 'utf8');
+  verifyBoard(join(output, 'board.json'), snap);
+
+  // data.js — the dashboard's data, beside the page (not inside dashboard/,
+  // so the dossier's text stays the page's own source).
+  const dataDoc = {
+    meta: { as_of: snap.as_of, source: snap.source, floor_usd: snap.floor_usd },
+    fit,
+    catMults: catRows,
+    comps,
+    rows,
+    evidence: {
+      valueAblation: VALUE_ABLATION,
+      oddsAblation: ODDS_ABLATION,
+      calibration: CALIBRATION,
+      calibrationError: CALIBRATION_ERROR,
+      validation: VALIDATION_V7,
+    },
+  };
+  writeFileSync(join(output, 'data.js'), 'window.LAUNCH_LEDGER = ' + JSON.stringify(dataDoc) + ';\n', 'utf8');
+
+  // dashboard/ and screenshots/ — copied from the repository.
+  copyDir(join(root, 'dashboard'), join(output, 'dashboard'));
+  if (existsSync(join(root, 'screenshots'))) copyDir(join(root, 'screenshots'), join(output, 'screenshots'));
+
+  // dossier.json — byte for byte what the kit's library writes.
+  const dossier = buildDossier(output, { text_max_bytes: 65536 });
+  writeFileSync(join(output, 'dossier.json'), dossier);
+
+  // A short run summary on stdout (not part of the output).
+  const top = rows[0];
+  console.log(`Launch Ledger v7 — ${snap.as_of} snapshot, ${snap.protocols.length} protocols`);
+  console.log(`ledger board=${fit.ledgerCounts.board} traded=${fit.ledgerCounts.traded} excluded=${fit.ledgerCounts.excluded}`);
+  console.log(`anchors=${fit.anchorsN} intercept=${fit.intercept.toFixed(4)} slope=${fit.slope.toFixed(4)} R2=${fit.r2.toFixed(4)} flat=${fit.flat.toFixed(4)} blend=${fit.blend} clamp=[${fit.clampLo}, ${fit.clampHi}]`);
+  console.log(`peers=${fit.peersN} verdicts FARM=${fit.verdictCounts.FARM} THIN=${fit.verdictCounts.THIN} SKIP=${fit.verdictCounts.SKIP}`);
+  console.log(`top1=${top.slug} $${top.implied_value_usd.toLocaleString('en-US')} sum=$${fit.sumEv.toLocaleString('en-US')} watchlistTop50=${fit.watchlistTop50}`);
+  console.log(`top20 bootstrap: ${rows[0].slug} EV P5–P95 $${(rows[0].ev_p5 as number).toLocaleString('en-US')}–$${(rows[0].ev_p95 as number).toLocaleString('en-US')}, fragile rows: ${rows.filter((r) => r.fragile).map((r) => r.slug).join(', ') || 'none'}`);
+  console.log(`checksum=${fit.checksum}`);
+  console.log(`gate self-check: PASS (${rows.length} rows, watchlist covered, farm plans 5 steps FARM/THIN, 3 steps SKIP)`);
+}
+
+main();

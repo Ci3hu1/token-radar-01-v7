@@ -1,14 +1,118 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launch Ledger — the token launch radar</title>
+<title>Launch Ledger v7 — Token Radar</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<main id="board" tabindex="-1" aria-busy="true"></main>
+<header class="masthead">
+  <div class="masthead-top">
+    <span class="kicker">DEFI · PRE-TOKEN RADAR · SNAPSHOT 14 NOV 2026</span>
+    <span class="kicker right">V7 · CLAMPED MULTIPLIERS · EVERY TERM TESTED</span>
+  </div>
+  <h1>Launch Ledger</h1>
+  <p class="standfirst">Which pre-token protocol is worth farming next, and what do I do about it.
+  Every protocol ranked by what its launch would be worth — implied market cap ×
+  the odds it issues a token — with the steps to farm it, and the evidence that
+  every term in the model earned its place.</p>
+  <div class="proof-strip" id="proof-strip"></div>
+  <section class="selfcheck" id="selfcheck" aria-label="Self-checks">
+    <h2>Self-checks — the board answers its own checks</h2>
+    <dl id="selfcheck-list"></dl>
+  </section>
+</header>
+
+<main>
+  <section class="controls" id="controls">
+    <label>Search <input id="q" type="search" placeholder="protocol, category, chain…" autocomplete="off"></label>
+    <label>Category
+      <select id="cat"><option value="">All categories</option></select>
+    </label>
+    <label>Verdict
+      <select id="verdict">
+        <option value="">All verdicts</option>
+        <option>FARM</option><option>THIN</option><option>SKIP</option>
+      </select>
+    </label>
+    <label><input id="watchonly" type="checkbox"> Watchlist only</label>
+    <label><input id="comparemode" type="checkbox"> Compare (pick 2–3 rows)</label>
+    <button id="csv" type="button">Export CSV</button>
+    <button id="clearpins" type="button">Clear pins</button>
+    <span class="showing" id="showing"></span>
+  </section>
+
+  <section class="board-wrap" id="board-wrap">
+    <table id="board">
+      <thead>
+        <tr>
+          <th data-sort="rank">#</th>
+          <th data-sort="name">Protocol</th>
+          <th data-sort="category">Category</th>
+          <th data-sort="tvl_usd">TVL</th>
+          <th data-sort="change_7d">7d</th>
+          <th data-sort="age_years">Age</th>
+          <th data-sort="prob_token">P(token)</th>
+          <th data-sort="implied_mcap_usd">Implied mcap</th>
+          <th data-sort="implied_value_usd">Expected value</th>
+          <th title="Bootstrap P5–P95 expected value, 200 refits">EV P5–P95</th>
+          <th data-sort="net_usd">Net / farmer</th>
+          <th data-sort="verdict">Verdict</th>
+          <th>Rank range</th>
+          <th>Pin</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section class="compare" id="compare" hidden>
+    <h2>Compare</h2>
+    <div id="compare-grid"></div>
+  </section>
+
+  <section class="detail" id="detail" hidden>
+    <h2 id="detail-title">Protocol detail</h2>
+    <div id="detail-body"></div>
+  </section>
+
+  <section class="sandbox" id="sandbox">
+    <h2>Model sandbox — the verdict assumptions</h2>
+    <p>Move a slider and the verdicts re-price live. The board above always shows the
+    published assumptions; this is what changes if they are wrong.</p>
+    <div class="sandbox-grid">
+      <label>Airdrop share <span id="share-val">5%</span>
+        <input id="share" type="range" min="1" max="20" step="0.5" value="5"></label>
+      <label>Farmers <span id="farmers-val">10,000</span>
+        <input id="farmers" type="range" min="1000" max="50000" step="1000" value="10000"></label>
+      <label>Gas + cost <span id="cost-val">$13</span>
+        <input id="cost" type="range" min="0" max="100" step="1" value="13"></label>
+      <label>FARM bar <span id="farmbar-val">$50</span>
+        <input id="farmbar" type="range" min="10" max="200" step="5" value="50"></label>
+    </div>
+    <p id="sandbox-out"></p>
+  </section>
+
+  <section class="evidence" id="evidence">
+    <h2>Evidence — how the numbers are made</h2>
+    <div id="evidence-body"></div>
+  </section>
+
+  <section class="method" id="method">
+    <h2>Method &amp; limits</h2>
+    <p id="method-body"></p>
+    <p class="checksum-line" id="checksum-line"></p>
+  </section>
+</main>
+
+<footer>
+  <p>Launch Ledger v7 · built from the sealed DefiLlama snapshot of 14 Nov 2026 (758 protocols,
+  $50,000,000 watchlist floor). A protocol is listed as recording no token, never as having
+  none. Implied values are this entry's own claim, not make.fun's. Not financial advice;
+  farming costs gas and time, and a token may never come.</p>
+</footer>
+
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>

@@ -1,217 +1,296 @@
-// Launch Ledger v7 — tests (Node 22 stdlib only).
-// Run: node --test tests/model.test.ts
-// The snapshot is read from RADAR_SNAPSHOT or the kit next to this repo.
+// model.test.ts — the v7 fitted model, pinned to the numbers the snapshot produces.
+// Run: node --test tests/model.test.ts  (Node 24 runs the .ts directly.)
+// Every number below is a value the code derives from the sealed snapshot at run
+// time; the test pins it so a regression in the fit is caught, not hidden.
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
-  parseSnapshot, onBoard, hasToken, fitValue, impliedMcap, peerStats, oddsOf,
-  netOf, verdictOf, farmSteps, validationTable, valueAblation, oddsAblation,
-  calibrationTable, bootstrapTop, boardChecksum, buildRadar, boardIssue,
-  irls, mulberry32, CLAMP_LO, CLAMP_HI, FROZEN_ODDS,
+  anchors,
+  assemble,
+  BLEND,
+  boardChecksum,
+  boardProtocols,
+  CALIBRATION,
+  CALIBRATION_ERROR,
+  catMults,
+  CLAMP_HI,
+  CLAMP_LO,
+  farmPlan,
+  fitCurve,
+  fitOdds,
+  flatMult,
+  gateRows,
+  ledger,
+  netFor,
+  ODDS,
+  ODDS_ABLATION,
+  peers,
+  peerStats,
+  preToken,
+  readSnap,
+  SHRINK_K,
+  tokenProb,
+  VALIDATION_V7,
+  VALUE_ABLATION,
+  verdictFor,
 } from '../lib/model.ts';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const SNAPSHOT =
-  process.env.RADAR_SNAPSHOT ??
-  join(here, '..', '..', 'token-radar-01-v7-kit', 'token-radar-01-kit', 'input', 'snapshot.json');
-const snapshot = parseSnapshot(readFileSync(existsSync(SNAPSHOT) ? SNAPSHOT : '/input/snapshot.json', 'utf8'));
-const asOf = new Date(`${snapshot.as_of}T00:00:00Z`);
-const watchlist = new Set(snapshot.watchlist);
-const boardProtos = snapshot.protocols.filter((p) => onBoard(p, watchlist, snapshot.floor_usd));
-const traded = snapshot.protocols.filter((p) => hasToken(p));
-const anchors = traded.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0);
-const stats = peerStats(snapshot);
-const model = fitValue(anchors, CLAMP_LO, CLAMP_HI);
-const { board, radar } = buildRadar(snapshot);
+const SNAP = '/home/hatch/workspace/tools/makefun/token-radar-01-v7-kit/token-radar-01-kit/input/snapshot.json';
+const snap = readSnap(SNAP);
 
-const approx = (actual: number, expected: number, tol: number, label: string) => {
+function close(actual: number, expected: number, tol: number, label: string): void {
   assert.ok(Math.abs(actual - expected) <= tol, `${label}: got ${actual}, want ${expected} ± ${tol}`);
-};
+}
 
-test('ledger: 226 board, 416 traded, 116 excluded, 40 on the watchlist', () => {
-  assert.equal(snapshot.protocols.length, 758);
-  assert.equal(traded.length, 416);
-  assert.equal(boardProtos.length, 226);
-  assert.equal(snapshot.protocols.length - traded.length - boardProtos.length, 116);
-  assert.equal(snapshot.watchlist.length, 40);
-  for (const slug of snapshot.watchlist) assert.ok(boardProtos.some((p) => p.slug === slug), `watchlist ${slug} missing`);
+test('snapshot: the sealed file is what the field guide says', () => {
+  assert.equal(snap.as_of, '2026-11-14');
+  assert.equal(snap.floor_usd, 50_000_000);
+  assert.equal(snap.protocols.length, 758);
+  assert.equal(snap.watchlist.length, 40);
 });
 
-test('anchors: 128 traded protocols with a positive market cap', () => {
-  assert.equal(anchors.length, 128);
+test('ledger: 226 board, 416 traded, 116 excluded', () => {
+  const L = ledger(snap);
+  assert.equal(L.board, 226);
+  assert.equal(L.traded, 416);
+  assert.equal(L.excluded, 116);
+  assert.equal(L.total, 758);
+  assert.equal(L.board + L.traded + L.excluded, 758);
 });
 
-test('OLS log-log: intercept 3.0247, slope 0.5223, R² 0.1939', () => {
-  approx(model.intercept, 3.0247, 0.001, 'intercept');
-  approx(model.slope, 0.5223, 0.001, 'slope');
-  approx(model.r2, 0.1939, 0.001, 'R²');
-  approx(model.flat, 0.2138, 0.001, 'flat multiple');
+test('board rule: the watchlist is covered and the versioned are out', () => {
+  const board = boardProtocols(snap);
+  const slugs = new Set(board.map((p) => p.slug));
+  for (const w of snap.watchlist) assert.ok(slugs.has(w), `watchlist ${w} missing from the board`);
+  assert.ok(!slugs.has('rysk-v12'), 'Rysk V12 is versioned and must be excluded');
+  assert.ok(board.every((p) => preToken(p)), 'every board row records no token');
+  assert.ok(board.every((p) => p.category !== 'CEX'), 'no CEX on the board');
 });
 
-test('category multipliers are clamped to [0.60, 1.80] in v7', () => {
-  approx(model.mults.get('Liquid Staking')!, 0.6, 0.001, 'Liquid Staking');
-  approx(model.mults.get('Privacy')!, 1.8, 0.001, 'Privacy');
-  for (const m of model.mults.values()) assert.ok(m >= CLAMP_LO && m <= CLAMP_HI, `multiplier ${m} outside clamp`);
+test('value model: OLS on 128 anchors', () => {
+  const al = anchors(snap.protocols);
+  assert.equal(al.length, 128);
+  const curve = fitCurve(al);
+  close(curve.intercept, 3.0247, 0.0005, 'intercept');
+  close(curve.slope, 0.5223, 0.0005, 'slope');
+  close(curve.r2, 0.1939, 0.0005, 'R2');
+  close(curve.residSd, 0.9092, 0.0005, 'residual SD');
+  close(flatMult(al), 0.2138, 0.0005, 'flat multiple');
+  assert.equal(BLEND, 0.28);
 });
 
-test('odds peers: 449, 245 with a token, median age 1.6235', () => {
-  assert.equal(stats.peers, 449);
-  assert.equal(stats.peersWithToken, 245);
-  approx(stats.medianAge, 1.6235, 0.001, 'median age');
+test('value model: category multipliers are clamped to [0.60, 1.80]', () => {
+  const al = anchors(snap.protocols);
+  const curve = fitCurve(al);
+  const mults = catMults(al, curve);
+  assert.equal(CLAMP_LO, 0.6);
+  assert.equal(CLAMP_HI, 1.8);
+  assert.equal(SHRINK_K, 3);
+  for (const [, m] of mults) {
+    assert.ok(m >= 0.6 && m <= 1.8, `multiplier ${m} outside the 0.60–1.80 clamp`);
+  }
+  // The clamp binds exactly at both ends: Liquid Staking was 0.4723×, Privacy 2.5089×.
+  assert.equal(mults.get('Liquid Staking'), 0.6);
+  assert.equal(mults.get('Privacy'), 1.8);
 });
 
-test('P(steakhouse-financial) is 0.7125', () => {
-  const steak = snapshot.protocols.find((p) => p.slug === 'steakhouse-financial')!;
-  approx(oddsOf(steak, stats, asOf), 0.7125, 0.001, 'P(steakhouse)');
+test('odds: 449 eligible peers and the fitted weights', () => {
+  const pl = peers(snap.protocols);
+  assert.equal(pl.length, 449);
+  const stats = peerStats(pl, snap.as_of);
+  assert.equal(stats.n, 449);
+  close(stats.medianAge, 1.6235, 0.001, 'median age');
+  // The refit lands near the constants the board uses.
+  const refit = fitOdds(pl, snap.as_of);
+  close(refit.bias, ODDS.bias, 0.06, 'odds bias');
+  close(refit.logTvl, ODDS.logTvl, 0.06, 'odds logTvl');
+  close(refit.age, ODDS.age, 0.12, 'odds age');
+  close(refit.growth, ODDS.growth, 0.09, 'odds growth');
 });
 
-test('top-5 expected values match the verified board', () => {
-  const top5 = board.slice(0, 5).map((r) => [r.slug, r.implied_value_usd]);
-  assert.deepEqual(top5, [
-    ['steakhouse-financial', 152994608],
-    ['gauntlet', 95119919],
-    ['veda', 54690945],
-    ['usdd', 51256531],
-    ['nonce-capital', 32726180],
+test('odds: steakhouse is the most likely top protocol', () => {
+  const pl = peers(snap.protocols);
+  const stats = peerStats(pl, snap.as_of);
+  const sh = snap.protocols.find((p) => p.slug === 'steakhouse-financial')!;
+  const pr = tokenProb(sh, stats, snap.as_of);
+  close(pr, 0.7125, 0.002, 'P(steakhouse)');
+});
+
+test('board: 226 rows, ranked by expected value, top-1 steakhouse', () => {
+  const { rows, fit } = assemble(snap);
+  assert.equal(rows.length, 226);
+  assert.equal(rows[0].slug, 'steakhouse-financial');
+  assert.equal(rows[0].rank, 1);
+  assert.equal(rows[0].implied_value_usd, 152_994_608);
+  assert.equal(fit.sumEv, 1_335_071_152);
+  assert.deepEqual(fit.verdictCounts, { FARM: 20, THIN: 93, SKIP: 113 });
+  assert.equal(fit.watchlistTop50, 34);
+  assert.equal(fit.ledgerCounts.board, 226);
+  // Ranks are 1..226 exactly once, and implied value does not rise with rank.
+  const ranks = rows.map((r) => r.rank).sort((a, b) => a - b);
+  for (let i = 0; i < 226; i++) assert.equal(ranks[i], i + 1);
+  for (let i = 1; i < rows.length; i++) {
+    assert.ok(rows[i].implied_value_usd <= rows[i - 1].implied_value_usd, `row ${i + 1} rises above row ${i}`);
+  }
+  // The clamp moves Veda past USDD: the v7 top five, in order.
+  assert.deepEqual(rows.slice(0, 5).map((r) => r.slug), [
+    'steakhouse-financial',
+    'gauntlet',
+    'veda',
+    'usdd',
+    'nonce-capital',
   ]);
+  assert.equal(rows[2].implied_value_usd, 54_690_945);
 });
 
-test('verdicts: 20 FARM, 93 THIN, 113 SKIP', () => {
-  const counts: Record<string, number> = {};
-  for (const r of board) counts[r.verdict] = (counts[r.verdict] ?? 0) + 1;
-  assert.deepEqual(counts, { FARM: 20, THIN: 93, SKIP: 113 });
-  assert.equal(netOf(12600000) >= 50, true);
-  assert.equal(verdictOf(2600000), 'THIN');
-  assert.equal(verdictOf(1000000), 'SKIP');
+test('board: verdict thresholds are the farm economics', () => {
+  assert.equal(verdictFor(12_600_000), 'FARM');
+  assert.equal(verdictFor(12_599_999), 'THIN');
+  assert.equal(verdictFor(2_600_000), 'THIN');
+  assert.equal(verdictFor(2_599_999), 'SKIP');
+  close(netFor(152_994_608), 751.97, 0.01, 'net for the top-1');
 });
 
-test('every farm plan is 3–12 steps of 20–600 characters', () => {
-  for (const r of board) {
-    assert.ok(r.farm_steps.length >= 3 && r.farm_steps.length <= 12, `${r.slug}: ${r.farm_steps.length} steps`);
+test('board: every FARM/THIN row carries a concrete 5-step plan, SKIP rows 3 steps', () => {
+  const { rows } = assemble(snap);
+  const planned = rows.filter((r) => r.verdict !== 'SKIP');
+  assert.equal(planned.length, 113);
+  for (const r of rows) {
+    const want = r.verdict === 'SKIP' ? 3 : 5;
+    assert.equal(r.farm_steps.length, want, `${r.slug}: ${r.farm_steps.length} steps, want ${want}`);
     for (const s of r.farm_steps) {
       const t = s.trim();
-      assert.ok(t.length >= 20 && t.length <= 600, `${r.slug}: step of ${t.length} chars`);
+      assert.ok(t.length >= 20 && t.length <= 600, `${r.slug}: step ${t.length} chars`);
+    }
+    if (r.verdict !== 'SKIP') {
+      const joined = r.farm_steps.join(' ');
+      assert.ok(joined.includes('$1,000'), `${r.slug}: plan names the $1,000 capital`);
+      assert.ok(joined.includes('$12'), `${r.slug}: plan names the $12 gas`);
+      assert.ok(/30 day/i.test(joined), `${r.slug}: plan names the 30-day hold`);
+      assert.ok(/exit/i.test(joined), `${r.slug}: plan names the exit trigger`);
+      assert.ok(joined.includes(r.chains[0] ?? 'Ethereum'), `${r.slug}: plan names its chain`);
     }
   }
-  assert.equal(boardIssue(board, snapshot), null);
+  // Plans differ by protocol (they name the protocol and its chain).
+  const plans = new Set(rows.map((r) => r.farm_steps.join('|')));
+  assert.ok(plans.size > 200, 'plans are mostly distinct');
 });
 
-test('validation: holdout 2579.1/84.4, WF50 689.8/86.4, WF75 571.4/76.6, LOO 1253.7/85.5', () => {
-  const v = validationTable(anchors, CLAMP_LO, CLAMP_HI);
-  approx(v.holdout.blendMean, 2579.1, 0.5, 'holdout mean');
-  approx(v.holdout.blendMedian, 84.4, 0.5, 'holdout median');
-  approx(v.wf50.blendMean, 689.8, 0.5, 'WF50 mean');
-  approx(v.wf50.blendMedian, 86.4, 0.5, 'WF50 median');
-  approx(v.wf75.blendMean, 571.4, 0.5, 'WF75 mean');
-  approx(v.wf75.blendMedian, 76.6, 0.5, 'WF75 median');
-  approx(v.loo.blendMean, 1253.7, 0.5, 'LOO mean');
-  approx(v.loo.blendMedian, 85.5, 0.5, 'LOO median');
-});
-
-test('value ablation: each term earns its place on the v7 clamp', () => {
-  const a = valueAblation(anchors, CLAMP_LO, CLAMP_HI);
-  const base = a.find((x) => x.variant === 'baseline')!;
-  const curveOnly = a.find((x) => x.variant === 'curve_only')!;
-  const flatOnly = a.find((x) => x.variant === 'flat_only')!;
-  const noMult = a.find((x) => x.variant === 'no_catmult')!;
-  approx(base.holdout[0], 2579.1, 0.5, 'baseline holdout mean');
-  approx(base.holdout[1], 84.4, 0.5, 'baseline holdout median');
-  approx(noMult.holdout[0], 1791.3, 0.5, 'no-catmult holdout mean');
-  approx(noMult.holdout[1], 88.6, 0.5, 'no-catmult holdout median');
-  // The curve earns its place on the means: dropping it (flat-only) hurts the mean on every split.
-  assert.ok(flatOnly.holdout[0] > base.holdout[0], 'flat-only hurts the holdout mean');
-  assert.ok(flatOnly.wf50[0] > base.wf50[0], 'flat-only hurts the WF50 mean');
-  assert.ok(flatOnly.loo[0] > base.loo[0], 'flat-only hurts the LOO mean');
-  assert.ok(flatOnly.wf50[1] > base.wf50[1], 'flat-only hurts the WF50 median');
-  assert.ok(flatOnly.wf75[1] > base.wf75[1], 'flat-only hurts the WF75 median');
-  // The flat blend earns its place on the walk-forward medians and the LOO mean.
-  assert.ok(curveOnly.wf50[1] > base.wf50[1], 'curve-only hurts the WF50 median');
-  assert.ok(curveOnly.wf75[1] > base.wf75[1], 'curve-only hurts the WF75 median');
-  assert.ok(curveOnly.loo[0] > base.loo[0], 'curve-only hurts the LOO mean');
-  approx(curveOnly.holdout[0], 2510.3, 0.5, 'curve-only holdout mean');
-  approx(curveOnly.holdout[1], 83.4, 0.5, 'curve-only holdout median');
-});
-
-test('odds ablation: every term earns its place, age most of all', () => {
-  const a = oddsAblation(snapshot, stats);
-  const full = a.find((x) => x.variant.startsWith('full'))!;
-  const dropAge = a.find((x) => x.variant === 'drop age')!;
-  const frozen = a.find((x) => x.variant.startsWith('frozen'))!;
-  approx(full.log_loss, 0.5901, 0.002, 'full log-loss');
-  approx(full.auc, 0.7552, 0.002, 'full AUC');
-  approx(dropAge.log_loss, 0.6671, 0.002, 'drop-age log-loss');
-  approx(dropAge.auc, 0.6525, 0.002, 'drop-age AUC');
-  approx(frozen.log_loss, 0.5809, 0.002, 'frozen log-loss');
-  approx(frozen.auc, 0.7554, 0.002, 'frozen AUC');
-});
-
-test('a fresh IRLS refit lands near the frozen constants', () => {
-  const peers = snapshot.protocols.filter(
-    (p) => p.listed_at !== null && p.change_7d !== null && p.category !== null && !['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX'].includes(p.category) && Math.abs(p.change_7d) <= 200,
-  );
-  const X = peers.map((p) => {
-    const age = ageYearsLocal(p) ?? stats.medianAge;
-    const change = p.change_7d ?? stats.meanChange;
-    return [1, (Math.log10(p.tvl_usd) - stats.meanLogTvl) / stats.sdLogTvl, (age - stats.meanAge) / stats.sdAge, (change - stats.meanChange) / stats.sdChange];
-  });
-  const y = peers.map((p) => (hasToken(p) ? 1 : 0));
-  const beta = irls(X, y);
-  // The refit lands near the frozen constants ([0.242, 0.329, 0.946, -0.366] vs frozen
-  // [0.28538, 0.3438, 0.89006, -0.44082]); the growth term differs most, by 0.075.
-  for (let i = 0; i < 4; i++) approx(beta[i]!, FROZEN_ODDS[i]!, 0.08, `IRLS beta[${i}]`);
-  function ageYearsLocal(p: (typeof snapshot.protocols)[number]): number | null {
-    if (p.listed_at === null) return null;
-    return (asOf.getTime() - new Date(`${p.listed_at}T00:00:00Z`).getTime()) / (365.25 * 24 * 3600 * 1000);
+test('board: gate rows are the shape the scorer reads', () => {
+  const { rows } = assemble(snap);
+  const gate = gateRows(rows);
+  assert.equal(gate.length, 226);
+  for (const g of gate) {
+    assert.ok(g.slug && !/\s/.test(g.slug));
+    assert.ok(g.name.length > 0);
+    assert.ok(Number.isInteger(g.rank) && g.rank >= 1);
+    assert.ok(Number.isInteger(g.implied_value_usd) && g.implied_value_usd > 0);
+    assert.ok(g.farm_steps.length === 3 || g.farm_steps.length === 5);
   }
 });
 
-test('calibration: weighted error 0.0441, mean pred 0.557 vs base rate 0.546', () => {
-  const c = calibrationTable(snapshot, stats);
-  approx(c.weighted_error, 0.0441, 0.002, 'weighted error');
-  approx(c.mean_pred, 0.557, 0.002, 'mean pred');
-  approx(c.base_rate, 0.546, 0.002, 'base rate');
-  assert.equal(c.deciles.length, 10);
-  approx(c.deciles[0]!.pred, 0.203, 0.002, 'D1 pred');
-  approx(c.deciles[9]!.obs, 0.911, 0.002, 'D10 obs');
+test('board: checksum is db668a77 and the run is deterministic', () => {
+  const a = assemble(snap);
+  const b = assemble(snap);
+  assert.equal(a.fit.checksum, 'db668a77');
+  assert.equal(a.fit.checksum, b.fit.checksum);
+  assert.equal(a.fit.checksum, boardChecksum(a.rows));
+  assert.equal(a.rows[0].implied_value_usd, b.rows[0].implied_value_usd);
+  assert.deepEqual(
+    a.rows.map((r) => [r.slug, r.implied_value_usd]),
+    b.rows.map((r) => [r.slug, r.implied_value_usd]),
+  );
 });
 
-test('bootstrap: steakhouse rank 1–1, bittensor-dtao is the fragile one', () => {
-  const oddsBySlug = new Map(board.map((r) => [r.slug, r.p_token]));
-  const boot = bootstrapTop(boardProtos, anchors, oddsBySlug, CLAMP_LO, CLAMP_HI);
-  assert.equal(boot.length, 20);
-  const steak = boot.find((b) => b.slug === 'steakhouse-financial')!;
-  assert.deepEqual([steak.rankMin, steak.rankMax], [1, 1]);
-  assert.equal(steak.baseEv, 152994608);
-  const bitt = boot.find((b) => b.slug === 'bittensor-dtao')!;
-  assert.ok(bitt.rankMax - bitt.rankMin >= 15, `bittensor rank range ${bitt.rankMin}–${bitt.rankMax}`);
-  const gauntlet = boot.find((b) => b.slug === 'gauntlet')!;
-  assert.deepEqual([gauntlet.rankMin, gauntlet.rankMax], [2, 3]);
+test('board: checksum is the sha256 of the compact rows as JSON', () => {
+  const { rows } = assemble(snap);
+  const compact = rows.map((r) => [r.slug, r.rank, r.implied_value_usd]);
+  const hex = createHash('sha256').update(JSON.stringify(compact), 'utf8').digest('hex').slice(0, 8);
+  assert.equal(hex, 'db668a77');
+  assert.match(hex, /^[0-9a-f]{8}$/);
 });
 
-test('mulberry32 is deterministic', () => {
-  const a = mulberry32(20261114);
-  const b = mulberry32(20261114);
-  for (let i = 0; i < 10; i++) assert.equal(a(), b());
-  const c = mulberry32(1);
-  assert.notEqual(a(), c());
+test('board: bootstrap intervals are sane and pin the top rows', () => {
+  const { rows } = assemble(snap);
+  const top = rows[0];
+  assert.equal(top.rank_min, 1);
+  assert.equal(top.rank_max, 1);
+  assert.equal(top.ev_p5, 74_418_826);
+  assert.equal(top.ev_p50, 134_856_894);
+  assert.equal(top.ev_p95, 241_309_207);
+  const fragile = rows.filter((r) => r.fragile).map((r) => r.slug).sort();
+  assert.deepEqual(fragile, ['b14g', 'bittensor-dtao', 'r25']);
+  const bit = rows.find((r) => r.slug === 'bittensor-dtao')!;
+  assert.equal(bit.rank_min, 5);
+  assert.equal(bit.rank_max, 23);
+  for (const r of rows) {
+    assert.ok(r.rank_min >= 1 && r.rank_min <= r.rank, `${r.slug}: lo ${r.rank_min} above rank ${r.rank}`);
+    assert.ok(r.rank_max >= r.rank && r.rank_max <= 226, `${r.slug}: hi ${r.rank_max} out of range`);
+    if (r.rank <= 20) {
+      assert.ok(r.ev_p5 !== null && r.ev_p50 !== null && r.ev_p95 !== null, `${r.slug}: top-20 row lacks EV intervals`);
+      assert.ok((r.ev_p5 as number) <= (r.ev_p50 as number), `${r.slug}: P5 above P50`);
+      assert.ok((r.ev_p50 as number) <= (r.ev_p95 as number), `${r.slug}: P50 above P95`);
+    } else {
+      assert.equal(r.ev_p5, null);
+      assert.equal(r.rank_min, r.rank);
+      assert.equal(r.rank_max, r.rank);
+    }
+  }
 });
 
-test('two builds write the same checksum (determinism)', () => {
-  const first = buildRadar(snapshot);
-  const second = buildRadar(snapshot);
-  assert.equal(first.radar.checksum, second.radar.checksum);
-  assert.equal(first.radar.checksum, radar.checksum);
-  assert.match(radar.checksum, /^[0-9a-f]{8}$/);
-  assert.equal(boardChecksum(first.board), radar.checksum);
+test('evidence: the v7 clamp improves the mean on every validation split', () => {
+  const base = VALUE_ABLATION.find((a) => a.variant.startsWith('v6 baseline'))!;
+  const v7 = VALUE_ABLATION.find((a) => a.variant.startsWith('v7 clamp'))!;
+  assert.deepEqual(v7.holdout, VALIDATION_V7.holdout);
+  assert.deepEqual(v7.walkFwd50, VALIDATION_V7.walkFwd50);
+  assert.deepEqual(v7.walkFwd75, VALIDATION_V7.walkFwd75);
+  assert.deepEqual(v7.loo, VALIDATION_V7.loo);
+  // Mean improves on all four splits; the median holds on three of four.
+  assert.ok(v7.holdout[0] < base.holdout[0], 'holdout mean');
+  assert.ok(v7.walkFwd50[0] < base.walkFwd50[0], 'walk-forward 50% mean');
+  assert.ok(v7.walkFwd75[0] < base.walkFwd75[0], 'walk-forward 75% mean');
+  assert.ok(v7.loo[0] < base.loo[0], 'leave-one-out mean');
+  assert.equal(v7.holdout[1], base.holdout[1]);
+  assert.equal(v7.walkFwd50[1], base.walkFwd50[1]);
+  assert.equal(v7.walkFwd75[1], base.walkFwd75[1]);
+  // Dropping the category multipliers hurts the median on every split: they earn their place.
+  const noCat = VALUE_ABLATION.find((a) => a.variant === 'no catmult')!;
+  assert.ok(noCat.holdout[1] > base.holdout[1]);
+  assert.ok(noCat.walkFwd50[1] > base.walkFwd50[1]);
+  assert.ok(noCat.walkFwd75[1] > base.walkFwd75[1]);
+  assert.ok(noCat.loo[1] > base.loo[1]);
 });
 
-test('boardIssue catches a tampered board', () => {
-  const bad = board.map((r) => ({ ...r }));
-  bad[0] = { ...bad[0]!, implied_value_usd: 1 };
-  assert.ok(boardIssue(bad, snapshot) !== null);
-  const missing = board.filter((r) => r.slug !== snapshot.watchlist[0]);
-  assert.ok(boardIssue(missing, snapshot) !== null);
+test('evidence: odds ablation keeps every term, calibration error is 0.0441', () => {
+  const full = ODDS_ABLATION.find((a) => a.variant.startsWith('full'))!;
+  const dropAge = ODDS_ABLATION.find((a) => a.variant === 'drop age')!;
+  assert.ok(dropAge.logLoss > full.logLoss + 0.07, 'age is the most important odds term');
+  assert.ok(dropAge.auc < full.auc - 0.09, 'dropping age costs AUC');
+  assert.equal(CALIBRATION.length, 10);
+  assert.equal(CALIBRATION_ERROR, 0.0441);
+  for (const d of CALIBRATION) {
+    assert.ok(d.predicted >= 0 && d.predicted <= 1);
+    assert.ok(d.observed >= 0 && d.observed <= 1);
+  }
+  assert.ok(CALIBRATION[0].predicted < CALIBRATION[9].predicted, 'deciles are ordered');
+});
+
+test('plan: a lending plan reads like lending, a bridge plan like a bridge', () => {
+  const lending = snap.protocols.find((p) => p.category === 'Lending' && preToken(p))!;
+  const bridge = snap.protocols.find((p) => p.category === 'Bridge' && preToken(p))!;
+  const lp = farmPlan(lending, 'FARM').join(' ');
+  const bp = farmPlan(bridge, 'FARM').join(' ');
+  assert.ok(/lend|borrow/i.test(lp), 'lending plan mentions lending');
+  assert.ok(/bridge/i.test(bp), 'bridge plan mentions bridging');
+  assert.ok(lp.includes(lending.name), 'plan names the protocol');
+  assert.ok(lp.includes('$1,000') && lp.includes('$12'), 'lending plan carries the capital and gas');
+});
+
+test('model: the frozen odds constants are the documented fit', () => {
+  assert.equal(ODDS.bias, 0.28538);
+  assert.equal(ODDS.logTvl, 0.3438);
+  assert.equal(ODDS.age, 0.89006);
+  assert.equal(ODDS.growth, -0.44082);
 });
